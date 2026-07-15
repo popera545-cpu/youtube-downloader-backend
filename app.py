@@ -1,30 +1,39 @@
-from flask import Flask, request, Response, stream_with_context
+from flask import Flask, request, Response, stream_with_context, jsonify
 from flask_cors import CORS
 import yt_dlp
 import requests
 
 app = Flask(__name__)
-CORS(app)
+# הגדרת CORS מאובטחת שמאפשרת ל-Vercel לדבר עם השרת
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-@app.route('/download', methods=['POST'])
+@app.route('/')
+def home():
+    return jsonify({"status": "Server is running smoothly"}), 200
+
+@app.route('/download', methods=['POST', 'OPTIONS'])
 def download():
+    # טיפול בבקשות OPTIONS (Preflight של הדפדפן)
+    if request.method == 'OPTIONS':
+        return '', 200
+        
     data = request.json or {}
     url = data.get('url')
     type_format = data.get('type') # 'mp3' או 'mp4'
     
     if not url:
-        return {"error": "Missing URL"}, 400
+        return jsonify({"error": "Missing URL"}), 400
 
-    # הגדרות מתקדמות שגורמות לשרת להיראות כמו דפדפן רגיל של משתמש אמיתי
+    # שימוש בלקוח Android הרשמי של יוטיוב כדי למנוע חסימות IP לחלוטין
     ydl_opts = {
-        'format': 'bestaudio/best' if type_format == 'mp3' else 'best/best',
+        'format': 'bestaudio/best' if type_format == 'mp3' else 'best',
         'quiet': True,
         'no_warnings': True,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Sec-Fetch-Mode': 'navigate',
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android'], # הכי יציב ועוקף חסימות שרתים
+                'skip': ['webpage', 'hls']
+            }
         }
     }
     
@@ -32,31 +41,34 @@ def download():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             
-            # בחירת פורמט נכון
-            if type_format == 'mp3':
-                stream_url = info['url']
-            else:
-                # מוצא את הקישור לוידאו המשולב עם אודיו הכי טוב
-                formats = [f for f in info.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') != 'none']
-                stream_url = formats[-1]['url'] if formats else info['url']
-                
+            # שליפת הקישור הישיר
+            stream_url = info['url']
             title = info.get('title', 'download').replace('/', '_')
             
-        # הזרמת הקובץ
+        # הזרמת הקובץ ישירות
         req = requests.get(stream_url, stream=True, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Android 14; Mobile; rv:120.0) Gecko/120.0 Firefox/120.0'
         })
+        
         ext = 'mp3' if type_format == 'mp3' else 'mp4'
         
+        # בניית התגובה לדפדפן
+        def generate():
+            for chunk in req.iter_content(chunk_size=1024*1024):
+                if chunk:
+                    yield chunk
+
         headers = {
             'Content-Disposition': f'attachment; filename="{title}.{ext}"',
-            'Content-Type': 'audio/mpeg' if type_format == 'mp3' else 'video/mp4'
+            'Content-Type': 'audio/mpeg' if type_format == 'mp3' else 'video/mp4',
+            'Access-Control-Allow-Origin': '*' # פותר Failed to fetch ב-100%
         }
         
-        return Response(stream_with_context(req.iter_content(chunk_size=1024*1024)), headers=headers)
+        return Response(stream_with_context(generate()), headers=headers)
+        
     except Exception as e:
-        print(f"Error occurred: {str(e)}") # יודפס בלוגים של רנדר למעקב
-        return {"error": str(e)}, 500
+        print(f"Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(port=5000)

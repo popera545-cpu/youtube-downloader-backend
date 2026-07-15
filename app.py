@@ -1,74 +1,59 @@
-from flask import Flask, request, Response, stream_with_context, jsonify
-from flask_cors import CORS
+from flask import Flask, request, send_file
 import yt_dlp
-import requests
+import time
+import os
 
 app = Flask(__name__)
-# הגדרת CORS מאובטחת שמאפשרת ל-Vercel לדבר עם השרת
-CORS(app, resources={r"/*": {"origins": "*"}})
+
+# זה עיצוב האתר הפשוט שכולם יראו כשיכנסו ללינק שלך
+HTML = """
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <title>הורדות וידאו</title>
+</head>
+<body style="text-align: center; font-family: Arial; margin-top: 50px; background: #111; color: white;">
+    <h1 style="color: #ff4444;">הורדת סרטונים ישירה</h1>
+    <form action="/download" method="get">
+        <input type="text" name="url" placeholder="הדבק לינק ליוטיוב..." style="padding: 15px; width: 80%; max-width: 400px; border-radius: 5px; border: none;">
+        <br><br>
+        <button type="submit" style="padding: 15px 30px; background: #ff4444; color: white; border: none; border-radius: 5px; font-weight: bold; cursor: pointer;">הורד עכשיו</button>
+    </form>
+</body>
+</html>
+"""
 
 @app.route('/')
 def home():
-    return jsonify({"status": "Server is running smoothly"}), 200
+    return HTML
 
-@app.route('/download', methods=['POST', 'OPTIONS'])
+@app.route('/download')
 def download():
-    # טיפול בבקשות OPTIONS (Preflight של הדפדפן)
-    if request.method == 'OPTIONS':
-        return '', 200
-        
-    data = request.json or {}
-    url = data.get('url')
-    type_format = data.get('type') # 'mp3' או 'mp4'
-    
+    url = request.args.get('url')
     if not url:
-        return jsonify({"error": "Missing URL"}), 400
-
-    # שימוש בלקוח Android הרשמי של יוטיוב כדי למנוע חסימות IP לחלוטין
+        return "חסר לינק!", 400
+    
+    # נותן שם ייחודי לכל קובץ כדי שאנשים לא ידרסו אחד לשני את ההורדות
+    filename = f"video_{int(time.time())}.mp4"
+    
     ydl_opts = {
-        'format': 'bestaudio/best' if type_format == 'mp3' else 'best',
-        'quiet': True,
-        'no_warnings': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android'], # הכי יציב ועוקף חסימות שרתים
-                'skip': ['webpage', 'hls']
-            }
-        }
+        'format': 'best',
+        'outtmpl': filename,
+        'cookiefile': 'cookies.txt', # חסינות מיוטיוב
+        'quiet': True
     }
     
     try:
+        # הספרייה עושה את העבודה
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            
-            # שליפת הקישור הישיר
-            stream_url = info['url']
-            title = info.get('title', 'download').replace('/', '_')
-            
-        # הזרמת הקובץ ישירות
-        req = requests.get(stream_url, stream=True, headers={
-            'User-Agent': 'Mozilla/5.0 (Android 14; Mobile; rv:120.0) Gecko/120.0 Firefox/120.0'
-        })
+            ydl.download([url])
         
-        ext = 'mp3' if type_format == 'mp3' else 'mp4'
-        
-        # בניית התגובה לדפדפן
-        def generate():
-            for chunk in req.iter_content(chunk_size=1024*1024):
-                if chunk:
-                    yield chunk
-
-        headers = {
-            'Content-Disposition': f'attachment; filename="{title}.{ext}"',
-            'Content-Type': 'audio/mpeg' if type_format == 'mp3' else 'video/mp4',
-            'Access-Control-Allow-Origin': '*' # פותר Failed to fetch ב-100%
-        }
-        
-        return Response(stream_with_context(generate()), headers=headers)
-        
+        # שולח את הקובץ למשתמש שהוריד
+        return send_file(filename, as_attachment=True)
     except Exception as e:
-        print(f"Error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        return f"קרתה שגיאה: {str(e)}"
 
 if __name__ == '__main__':
-    app.run(port=5000)
+    # מריץ את השרת על הפורט ש-Render דורש
+    app.run(host='0.0.0.0', port=10000)
